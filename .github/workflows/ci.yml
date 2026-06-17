@@ -1,0 +1,86 @@
+name: CI
+
+# WHY two separate jobs: the engine + unit tests are the fast, always-run signal
+# (no JUCE, seconds to build) and prove the core is correct on all three
+# platforms. The plugin job is the slower cross-platform proof that the JUCE
+# VST3/AU/Standalone targets actually compile with each platform's real
+# toolchain (MSVC / Xcode-clang / GCC) - including AU, which only builds on macOS.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine-tests:
+    name: engine + tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (tests on, plugin off, warnings = errors)
+        run: cmake -B build -DGRIDSEQ_BUILD_TESTS=ON -DGRIDSEQ_BUILD_PLUGIN=OFF -DGRIDSEQ_WERROR=ON
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Run unit tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  plugin:
+    name: plugin VST3/AU (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # JUCE needs these system libraries to build on Linux (X11, ALSA, FreeType,
+      # Fontconfig, GL). Web-browser/cURL modules are disabled in CMake so their
+      # dev packages are intentionally omitted.
+      - name: Install JUCE Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libfreetype6-dev libfontconfig1-dev \
+            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev \
+            libxinerama-dev libxrandr-dev libxrender-dev \
+            libglu1-mesa-dev mesa-common-dev
+
+      - name: Configure (plugin on)
+        run: cmake -B build -DGRIDSEQ_BUILD_PLUGIN=ON -DGRIDSEQ_BUILD_TESTS=OFF
+
+      - name: Build VST3 / AU / Standalone
+        run: cmake --build build --config Release
+
+      # Prove the built plugin isn't just compiled but a *valid, loadable* VST3:
+      # run Tracktion's pluginval (the de-facto JUCE validator) against it. Done
+      # on Windows, where the runner has a desktop session for the editor tests.
+      - name: Validate VST3 with pluginval
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_Windows.zip" -OutFile pluginval.zip
+          Expand-Archive pluginval.zip -DestinationPath pluginval -Force
+          $vst3 = "build/plugin/GridSeqPlugin_artefacts/Release/VST3/GridSeq.vst3"
+          # Gate on pluginval's REPORTED result ("SUCCESS" / "FAILED"), not its
+          # exit code: on a headless CI runner pluginval returns non-zero from
+          # app shutdown even when every test passes (it prints SUCCESS), and
+          # GitHub's pwsh propagates that trailing exit code. Parsing the output
+          # is the reliable signal.
+          $out = & ./pluginval/pluginval.exe --strictness-level 5 --validate-in-process --validate $vst3 2>&1 | Out-String
+          Write-Host $out
+          if ($out -match 'SUCCESS' -and $out -notmatch 'FAILED') { Write-Host 'pluginval: PASS'; exit 0 }
+          else { Write-Host 'pluginval: FAIL'; exit 1 }

@@ -1,0 +1,10 @@
+# Normalise line endings so the repo is identical on Linux/macOS/Windows - the
+# same cross-platform discipline the build itself targets. Source is stored with
+# LF in the repo; Git checks it out natively per platform.
+* text=auto eol=lf
+
+# Binary assets must never be line-ending munged.
+*.wav  binary
+*.aiff binary
+*.png  binary
+*.vst3 binary
